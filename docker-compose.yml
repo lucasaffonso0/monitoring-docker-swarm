@@ -1,0 +1,179 @@
+version: '3.9'
+
+services:
+  traefik:
+    image: traefik:v3.2.1
+    command:
+      - --api.dashboard=true
+      - --accesslog=true
+      - --log.level=DEBUG
+      #- --log.filepath=/var/log/traefik.log
+      #- --accesslog.filepath=/var/log/access.log
+      - --providers.swarm.exposedByDefault=false
+      - --providers.swarm.network=traefik-net
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --metrics.prometheus=true
+      - --metrics.prometheus.buckets=0.1,0.3,1.2,5.0
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      #- /var/log:/var/log
+    networks:
+      - traefik-net
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.metrics.rule=Path(`/metrics`)
+        - traefik.http.routers.metrics.service=prometheus@internal
+        - traefik.http.services.metrics.loadbalancer.server.port=1337
+       # - traefik.http.routers.metrics.middlewares=myauth
+       # - traefik.http.middlewares.myauth.basicauth.users=test:$$apr1$$H6uskkkW$$IgXLP6ewTrSuBkTrqE8wj/
+
+  prometheus:
+    container_name: monitoring_prometheus
+    image: prom/prometheus:v3.0.1
+    volumes:
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - traefik-net
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.monitoring==true
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.prometheus.rule=Host(`prometheus.seudominio.com`)
+        - traefik.http.services.prometheus.loadbalancer.server.port=9090
+    secrets:
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yml
+
+  grafana:
+    container_name: monitoring_grafana
+    image: grafana/grafana:11.1.10
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER__FILE=/run/secrets/grafana_admin_user
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_admin_password
+    networks:
+      - traefik-net
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.monitoring==true
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.grafana.rule=Host(`monitoring.seudominio.com`)
+        - traefik.http.services.grafana.loadbalancer.server.port=3000
+    secrets:
+      - grafana_admin_user
+      - grafana_admin_password
+
+  loki:
+    container_name: monitoring_loki
+    image: grafana/loki:3.3.0
+    command: -config.file=/etc/loki/local-config.yaml
+    user: "0" #Set root user
+    volumes:
+     - loki_data:/tmp/loki
+    networks:
+      - traefik-net
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.monitoring==true
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.loki.rule=Host(`loki.seudominio.com`)
+        - traefik.http.services.loki.loadbalancer.server.port=3100
+    secrets:
+      - source: loki_config
+        target: /etc/loki/local-config.yaml
+
+  promtail:
+    container_name: monitoring_promtail
+    image: grafana/promtail:3.3.0
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers
+      - /var/log:/var/log
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - traefik-net
+    deploy:
+      mode: global
+    secrets:
+      - source: promtail_config
+        target: /etc/promtail/config.yml
+
+  node_exporter:
+    container_name: monitoring_node_exporter
+    image: prom/node-exporter:v1.8.2
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    networks:
+      - traefik-net
+    deploy:
+      mode: global
+
+  cadvisor:
+    container_name: monitoring_cadvisor
+    image: gcr.io/cadvisor/cadvisor:v0.51.0
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - traefik-net
+    deploy:
+      mode: global
+
+networks:
+  traefik-net:
+    external: true
+
+volumes:
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  loki_data:
+    driver: local
+
+secrets:
+  prometheus_config:
+    file: ./prometheus/prometheus.yml
+  loki_config:
+    file: ./loki/config.yml
+  promtail_config:
+    file: ./promtail/config.yml
+  grafana_admin_user:
+    external: true
+  grafana_admin_password:
+    external: true
